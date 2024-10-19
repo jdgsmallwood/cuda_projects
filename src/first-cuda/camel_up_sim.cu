@@ -45,7 +45,6 @@ __global__ void camel_up_sim(curandState *state, const int *positions,
   int local_positions[NUM_CAMELS];
   bool local_dice[NUM_CAMELS];
   int local_stack[NUM_CAMELS];
-  bool moved_camels[NUM_CAMELS] = {0, 0, 0, 0, 0};
   int dice_remaining;
 
   int camel_to_move;
@@ -56,8 +55,8 @@ __global__ void camel_up_sim(curandState *state, const int *positions,
   for (int r = 0; r < local_runs; r++) {
     // Begin one simulation
     dice_remaining = 0;
-    
-    #pragma unroll
+
+#pragma unroll
     for (int i = 0; i < NUM_CAMELS; i++) {
       // reset local arrays back to saved initial state.
       local_positions[i] = saved_local_positions[i];
@@ -70,11 +69,12 @@ __global__ void camel_up_sim(curandState *state, const int *positions,
     }
 
     while (dice_remaining > 0) {
-
+      // Figure out which camel should be moved.
       do {
         camel_to_move = curand(&state[idx]) % NUM_CAMELS;
       } while (!local_dice[camel_to_move]);
 
+      // Roll that camel's dice to see how far it moves.
       roll = curand(&state[idx]) % DICE_MAX + 1;
 
       // move that camel and set its dice as rolled.
@@ -82,27 +82,12 @@ __global__ void camel_up_sim(curandState *state, const int *positions,
       local_dice[camel_to_move] = 0;
 
 #pragma unroll
-      for (int j = 0; j < NUM_CAMELS; j++) {
-        moved_camels[j] = 0;
-      }
-      moved_camels[camel_to_move] = 1;
-
-      camel_on_top = local_stack[camel_to_move];
-
-      // Move anyone who is on top of the camel that's moving
-      while (camel_on_top != -1) {
-        local_positions[camel_on_top] += roll;
-        moved_camels[camel_on_top] = 1;
-        camel_on_top = local_stack[camel_on_top];
-      }
-
-#pragma unroll
       for (int i = 0; i < NUM_CAMELS; i++) {
         // If anyone was on the space the stack moved to, make that camel point
         // to the bottom of the new stack
         if ((i != camel_to_move) &&
             (local_positions[i] == local_positions[camel_to_move]) &&
-            (local_stack[i] == -1) && (!moved_camels[i])) {
+            (local_stack[i] == -1)) {
           local_stack[i] = camel_to_move;
         } else if ((local_stack[i] == camel_to_move) &&
                    (local_positions[i] < local_positions[camel_to_move])) {
@@ -110,6 +95,15 @@ __global__ void camel_up_sim(curandState *state, const int *positions,
           // then make them uncovered.
           local_stack[i] = -1;
         }
+      }
+
+      camel_on_top = local_stack[camel_to_move];
+
+      // Move anyone who is on top of the camel that's moving
+      while (camel_on_top != -1) {
+        local_positions[camel_on_top] += roll;
+        // moved_camels[camel_on_top] = 1;
+        camel_on_top = local_stack[camel_on_top];
       }
 
       dice_remaining--;
@@ -130,6 +124,8 @@ __global__ void camel_up_sim(curandState *state, const int *positions,
     thread_results[winner] += 1;
   }
 
+// Start collecting the results from all the threads.
+// Start by shuffling down on a warp basis.
 #pragma unroll
   for (int i = 0; i < NUM_CAMELS; i++) {
     for (int offset = 16; offset > 0; offset /= 2) {
@@ -137,15 +133,16 @@ __global__ void camel_up_sim(curandState *state, const int *positions,
           __shfl_down_sync(FULL_MASK, thread_results[i], offset);
     }
 
-    // If it's the first thread in a warp - report the result.
-    if (threadIdx.x % 32 == 0) {
+    // If it's the first thread in a warp - report the result to shared memory.
+    if (thread_idx % 32 == 0) {
       atomicAdd(&shared_results[i], thread_results[i]);
     }
   }
 
   __syncthreads();
 
-  if (threadIdx.x == 0) {
+  // Report block totals back to the global results variable.
+  if (thread_idx == 0) {
 #pragma unroll
     for (int i = 0; i < NUM_CAMELS; i++) {
       atomicAdd(&results[i], shared_results[i]);
