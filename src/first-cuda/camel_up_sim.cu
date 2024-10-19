@@ -21,7 +21,7 @@ __global__ void camel_up_sim(curandState *state, const int *positions,
 
   __shared__ T shared_results[NUM_CAMELS];
 
-  if (idx < NUM_CAMELS) {
+  if (thread_idx < NUM_CAMELS) {
     shared_results[thread_idx] = 0;
   }
   __syncthreads();
@@ -102,7 +102,6 @@ __global__ void camel_up_sim(curandState *state, const int *positions,
       // Move anyone who is on top of the camel that's moving
       while (camel_on_top != -1) {
         local_positions[camel_on_top] += roll;
-        // moved_camels[camel_on_top] = 1;
         camel_on_top = local_stack[camel_on_top];
       }
 
