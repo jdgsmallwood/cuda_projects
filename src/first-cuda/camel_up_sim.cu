@@ -25,13 +25,7 @@ __global__ void camel_up_sim(curandState *state, T *results, const T local_runs)
   
   curandState local_state = state[idx];
 
-  __shared__ T shared_results[NUM_CAMELS * 1024 / 32];
-
-  if (thread_idx < NUM_CAMELS) {
-    shared_results[thread_idx] = 0;
-    
-  }
-  __syncthreads();
+  __shared__ T shared_results[NUM_CAMELS];
 
   T thread_results[NUM_CAMELS] = {0};
 
@@ -129,6 +123,7 @@ __global__ void camel_up_sim(curandState *state, T *results, const T local_runs)
 // Start by shuffling down on a warp basis.
 #pragma unroll
   for (int i = 0; i < NUM_CAMELS; i++) {
+    #pragma unroll
     for (int offset = 16; offset > 0; offset /= 2) {
       thread_results[i] +=
           __shfl_down_sync(FULL_MASK, thread_results[i], offset);
@@ -136,7 +131,7 @@ __global__ void camel_up_sim(curandState *state, T *results, const T local_runs)
 
     // If it's the first thread in a warp - report the result to shared memory.
     if (thread_idx % 32 == 0) {
-      shared_results[thread_idx / 32 * NUM_CAMELS + i] = thread_results[i];
+      atomicAdd(&shared_results[i], thread_results[i]);
     }
   }
 
@@ -145,15 +140,10 @@ __global__ void camel_up_sim(curandState *state, T *results, const T local_runs)
   // Report block totals back to the global results variable.
   if (thread_idx == 0) {
 
-    int final_results[NUM_CAMELS] = {0};
-
     
-    
+    #pragma unroll
     for (int i = 0; i < NUM_CAMELS; i++) {
-    for (int j = 0; j < blockDim.x / 32; j++) {
-        final_results[i] += shared_results[j * NUM_CAMELS + i];
-    }
-      results[blockIdx.x * NUM_CAMELS + i] = final_results[i];
+    atomicAdd(&results[i], shared_results[i]);
     }
   }
 }
@@ -189,12 +179,9 @@ int main() {
   bool remainingDice[NUM_CAMELS] = {1, 1, 1, 1, 1};
   int stack[NUM_CAMELS] = {1, 2, 3, 4, -1};
   T *results;
-  results = (T *)malloc(NUM_CAMELS * BLOCKS * sizeof(T));
+  results = (T *)malloc(NUM_CAMELS * sizeof(T));
 
   std::cout << "Creating device pointers..." << std::endl;
-//   int *d_positions;
-//   bool *d_remainingDice;
-//   int *d_stack;
   T *d_results;
 
   curandState *d_state;
@@ -204,12 +191,9 @@ int main() {
   setup_kernel<<<BLOCKS, THREADS>>>(d_state);
 
   std::cout << "Allocating memory on device..." << std::endl;
-  //cudaMalloc((void **)&d_positions, NUM_CAMELS * sizeof(int));
-  cudaMalloc((void **)&d_results, NUM_CAMELS * BLOCKS * sizeof(T));
-  //cudaMalloc((void **)&d_remainingDice, NUM_CAMELS * sizeof(bool));
-  cudaMalloc((void **)&d_stack, NUM_CAMELS * sizeof(int));
+  cudaMalloc((void **)&d_results, NUM_CAMELS * sizeof(T));
 
-  cudaMemset(d_results, 0, NUM_CAMELS * BLOCKS * sizeof(T));
+  cudaMemset(d_results, 0, NUM_CAMELS * sizeof(T));
 
   std::cout << "Copying to device..." << std::endl;
   cudaMemcpyToSymbol(d_positions, positions, NUM_CAMELS * sizeof(int));
@@ -222,23 +206,17 @@ int main() {
   cudaDeviceSynchronize();
 
   std::cout << "Copying results back..." << std::endl;
-  cudaMemcpy(results, d_results, NUM_CAMELS * BLOCKS * sizeof(T),
+  cudaMemcpy(results, d_results, NUM_CAMELS * sizeof(T),
              cudaMemcpyDeviceToHost);
 
-  int finalResults[NUM_CAMELS] = {0};
-  for (int i = 0; i < BLOCKS; i++) {
-    for (int j =0; j < NUM_CAMELS; j++) {
-        finalResults[j] += results[i * NUM_CAMELS + j];
-    }
-  }
-
   std::cout << "Results are:" << std::endl;
-  printArray(finalResults, NUM_CAMELS);
+  printArray(results, NUM_CAMELS);
 
   float probs[NUM_CAMELS];
   constexpr float N_float = static_cast<float>(N);
+  #pragma unroll
   for (int i = 0; i < NUM_CAMELS; i++) {
-    probs[i] = static_cast<float>(finalResults[i]) / N_float;
+    probs[i] = static_cast<float>(results[i]) / N_float;
   }
 
   std::cout << "Probabilities are..." << std::endl;
